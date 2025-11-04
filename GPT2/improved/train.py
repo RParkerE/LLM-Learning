@@ -126,6 +126,7 @@ def train(model, train_loader, val_loader, optimizer, epochs, patience, clip_val
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
                 
             optimizer.step()
+            scheduler.step()  # Step after each batch
             total_train_loss += loss.item()
         
         avg_train_loss = total_train_loss / len(train_loader)
@@ -137,9 +138,6 @@ def train(model, train_loader, val_loader, optimizer, epochs, patience, clip_val
         print(YELLOW + f"\n--- Epoch {epoch+1}/{epochs} ---" + RESET)
         print(MAGENTA + f"Train Loss: {avg_train_loss:.4f}" + RESET)
         print(CYAN + f"Validation Loss: {avg_val_loss:.4f}" + RESET)
-
-        # Update Scheduler
-        scheduler.step(avg_val_loss)
 
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Current Learning Rate: {current_lr:.6f}")
@@ -155,7 +153,6 @@ def train(model, train_loader, val_loader, optimizer, epochs, patience, clip_val
 
 
 if __name__ == "__main__":
-    # Initialize model and tokenizer
     config = Config()
     model = GPT2(config).to(device)
     tokenizer = tiktoken.get_encoding("gpt2")
