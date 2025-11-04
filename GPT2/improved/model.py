@@ -1,6 +1,45 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from math import sqrt
+
+device = torch.device("cuda")
+
+
+# RoPE Implementation
+class RotaryPositionalEncoding(nn.Module):
+    def __init__(self, dim, max_seq_len=2048):
+        super().__init__()
+        assert dim % 2 == 0
+
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+
+        position = torch.arange(max_seq_len, dtype=torch.float32).unsqueeze(1)
+
+        # Compute Frequency Terms
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+
+        # Compute Rotation Angles
+        freqs = position * inv_freq
+        self.register_buffer("cos_cached", torch.cos(freqs), persistent=False)
+        self.register_buffer("sin_cached", torch.sin(freqs), persistent=False)
+
+    def forward(self, x):
+        """
+        x: shape (batch, heads, seq_len, head_dim)
+        """
+        seq_len = x.size(-2)
+        cos = self.cos_cached[:seq_len, :].unsqueeze(0).unsqueeze(0)
+        sin = self.sin_cached[:seq_len, :].unsqueeze(0).unsqueeze(0)
+
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+
+        # Apply Rotation
+        x_rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+        
+        return x_rotated
 
 
 class MultiHeadAttention(nn.Module):
@@ -11,6 +50,7 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim_out // num_heads
         self.scale = self.head_dim ** -0.5
+        self.rate = dropout
 
         # Q, K, V Projections
         self.W_q = nn.Linear(dim_in, dim_out)
@@ -19,6 +59,9 @@ class MultiHeadAttention(nn.Module):
 
         # Final Output Projection
         self.out_proj = nn.Linear(dim_out, dim_out)
+
+        # RoPE
+        self.rope = RotaryPositionalEncoding(self.head_dim, context_length)
 
         # Dropout
         self.dropout = nn.Dropout(dropout)
@@ -41,19 +84,13 @@ class MultiHeadAttention(nn.Module):
         K = K.view(batch_size, embed_size, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, embed_size, self.num_heads, self.head_dim).transpose(1, 2)
 
+        # Apply RoPE
+        Q = self.rope(Q)
+        K = self.rope(K)
+
         # Attention Scores
-        attention_scores = (Q @ K.transpose(-2, -1)) * self.scale
-
-        # Apply Casual Mask
         mask = self.mask[:embed_size, :embed_size] == 1
-        attention_scores = attention_scores.masked_fill(mask, float('-inf'))
-
-        # Softmax And Dropout
-        attention_weights = F.softmax(attention_scores, dim=-1)
-        attention_weights = self.dropout(attention_weights)
-
-        # Weighted Sum Of Values
-        context = attention_weights @ V
+        context = F.scaled_dot_product_attention(query=Q, key=K, value=V, attn_mask=mask, dropout_p=self.rate)
         context = context.transpose(1, 2).contiguous().view(batch_size, embed_size, -1)
 
         return self.out_proj(context)
@@ -117,24 +154,16 @@ class TransformerLayer(nn.Module):
         self.drop_shortcut = nn.Dropout(config.drop_rate)
 
     def forward(self, x):
-        residual1 = x
-        x = self.norm1(x)
-        x = self.att(x)
-        x = self.drop_shortcut(x)
-        x = x + residual1
-        residual2 = x
-        x = self.norm2(x)
-        x = self.ff(x)
-        x = self.drop_shortcut(x)
-        x = x + residual2
+        x = x + self.drop_shortcut(self.att(self.norm1(x)))
+        x = x + self.drop_shortcut(self.ff(self.norm2(x)))
         return x
 
 
 class GPT2(nn.Module):
     def __init__(self, config):
         super().__init__()
+        
         self.token_embedding = nn.Embedding(config.vocab_size, config.embedding_dim)
-        self.positional_embedding = nn.Embedding(config.context_length, config.embedding_dim)
         self.dropout = nn.Dropout(config.drop_rate)
 
         self.transformer_layers = nn.Sequential(
@@ -144,16 +173,26 @@ class GPT2(nn.Module):
         self.final_norm = nn.LayerNorm(config.embedding_dim)
         self.final_output = nn.Linear(config.embedding_dim, config.vocab_size)
 
-    def forward(self, in_idx):
-        batch_size, seq_len = in_idx.shape
-        token_embedding = self.token_embedding(in_idx)
-        positional_embedding = self.positional_embedding(torch.arange(seq_len, device=in_idx.device))
-        x = token_embedding + positional_embedding
-        x = self.dropout(x)
+        self._init_weights()
 
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, in_idx):
+        token_embedding = self.token_embedding(in_idx)
+        
+        x = self.dropout(token_embedding)
         x = self.transformer_layers(x)
         x = self.final_norm(x)
+        
         logits = self.final_output(x)
+        
         return logits
 
 

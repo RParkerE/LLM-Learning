@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.amp import autocast, GradScaler
 import tiktoken
-from sklearn.model_selection import train_test_split
 import random
 import numpy as np
 
@@ -26,15 +26,15 @@ CYAN = '\033[36m'
 RESET = '\033[0m' 
 
 # Temporarily force CPU to debug
-device = torch.device("cpu")
+device = torch.device("cuda")
 print(f"Using device: {device}")
 
 # Set random seeds
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-if torch.backends.mps.is_available():
-    torch.mps.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(SEED)
 
 
 class CustomDataset(Dataset):
@@ -101,19 +101,27 @@ def validate(model, dataloader):
 
 def train(model, train_loader, val_loader, optimizer, epochs, patience, clip_value, model_path="best_custom.pt"):
     early_stopper = EarlyStopper(patience=patience, verbose=True, path=model_path)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
+    warmup_steps = len(train_loader) * epochs // 10
+    total_steps = len(train_loader) * epochs
+
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_steps)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps)
+    scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], [warmup_steps])
+
+    scaler = GradScaler('cuda')
     
     model.train()
     for epoch in range(epochs):
         total_train_loss = 0
         for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
+            xb = xb.contiguous().to(device)
+            yb = yb.contiguous().to(device)
+            
             optimizer.zero_grad()
             logits = model(xb)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), yb.view(-1))
             loss.backward()
             
-            # Gradient clipping BEFORE optimizer step
             if clip_value is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
                 
@@ -168,9 +176,9 @@ if __name__ == "__main__":
     print(f"Val data length: {len(val_data)}")
     
     train_dataset = CustomDataset(train_data, tokenizer)
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=False)
     val_dataset = CustomDataset(val_data, tokenizer)
-    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, pin_memory=False)
 
     print(f"Train batches: {len(train_dataloader)}")
     print(f"Val batches: {len(val_dataloader)}")

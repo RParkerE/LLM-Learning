@@ -22,3 +22,18 @@
 
 7. **SwiGLU Activation** 
     - Replaces GELU in feedforward layers. More expressive and performs better in modern LLMs.
+
+
+## Upgrades V2.0
+
+1. **RoPE**
+    - Introduces rotational position encoding to improve generalization to longer sequences and enhance attention pattern flexibility.
+
+2. **Residual Connection Scaling (DeepNorm)**
+    - Applies layer-dependent residual scaling `(1 / (2L)^{1/4})` to stabilize training across deeper transformer stacks.
+
+3. **LR Scheduler With Warmup**
+    - Gradually increases the learning rate during the initial warmup phase for more stable early training, followed by cosine or plateau decay.
+
+4. **Mixed Precision Training**
+    - Reduces memory usage and accelerates training while maintaining model accuracy through dynamic loss scaling.

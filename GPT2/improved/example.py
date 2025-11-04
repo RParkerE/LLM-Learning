@@ -22,8 +22,6 @@ def generate_text(model, idx, max_new_tokens, context_size, temperature, top_p):
     Returns:
         idx: (B, T + max_new_tokens) array with generated tokens appended
     """
-    model.eval()
-
     for _ in range(max_new_tokens):
         # Crop current context if it exceeds the supported context size
         idx_cond = idx[:, -context_size:]
@@ -72,7 +70,7 @@ if __name__ == "__main__":
     model.eval()
 
     # Starting prompt
-    start_context = "My mother in vietnames is said by saying"
+    start_context = "What temperature shoul I bake cookies at?"
 
     # Encode input
     encoded = tokenizer.encode(start_context)
