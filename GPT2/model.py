@@ -1,7 +1,7 @@
-import tiktoken
-import torch.nn.functional as F
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, dim_in, dim_out, context_length, dropout, num_heads):
@@ -58,6 +58,7 @@ class MultiHeadAttention(nn.Module):
 
         return self.out_proj(context)
 
+
 class LayerNorm(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
@@ -71,12 +72,14 @@ class LayerNorm(nn.Module):
         norm_x = (x-mean) / torch.sqrt(var+self.eps)
         return self.scale * norm_x + self.shift
 
+
 class GELU(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(torch.sqrt(torch.tensor(2.0 / torch.pi)) * (x + 0.044715 * torch.pow(x,3)) ))
+        return 0.5 * x * (1 + torch.tanh(torch.sqrt(torch.tensor(2.0 / torch.pi)) * (x + 0.044715 * torch.pow(x,3))))
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim):
@@ -89,6 +92,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
 
 class TransformerLayer(nn.Module):
     def __init__(self, config):
@@ -118,6 +122,7 @@ class TransformerLayer(nn.Module):
         x = x + residual2
         return x
 
+
 class GPT2(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -126,7 +131,7 @@ class GPT2(nn.Module):
         self.dropout = nn.Dropout(config.drop_rate)
 
         self.transformer_layers = nn.Sequential(
-            * [TransformerLayer(config) for _ in range(config.transformer_layer)]
+            *[TransformerLayer(config) for _ in range(config.transformer_layer)]
         )
 
         self.final_norm = nn.LayerNorm(config.embedding_dim)
@@ -144,6 +149,7 @@ class GPT2(nn.Module):
         logits = self.final_output(x)
         return logits
 
+
 class Config:
     def __init__(self):
         self.vocab_size = 50257
@@ -152,107 +158,3 @@ class Config:
         self.transformer_layer = 12
         self.attention_heads = 12
         self.context_length = 1024
-
-config = Config()
-model = GPT2(config)
-
-start_context = "The bluefooted booby is a bird found primarily in the"
-
-tokenizer = tiktoken.get_encoding("gpt2")
-encoded = tokenizer.encode(start_context)
-encoded_tensor = torch.tensor(encoded).unsqueeze(0)
-
-
-########## CODE TO TRAIN GPT2 MODEL ##########
-from torch.utils.data import Dataset, DataLoader
-
-class CustomDataset(Dataset):
-    def __init__(self, data, tokenizer, block_size=32):
-        self.tokenizer = tokenizer
-        self.data = tokenizer.encode(data)
-        self.block_size = block_size
-
-    def __len__(self):
-        return len(self.data) - self.block_size
-
-    def __getitem__(self, idx):
-        chunk = self.data[idx:idx + self.block_size + 1]
-        x = torch.tensor(chunk[:-1], dtype=torch.long)
-        y = torch.tensor(chunk[1:], dtype=torch.long)
-        return x, y
-
-
-def train(model, dataloader, optimizer, epochs=10):
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        for xb, yb in dataloader:
-            optimizer.zero_grad()
-            logits = model(xb)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), yb.view(-1))
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch {epoch+1} Loss: {total_loss:.4f}")
-
-with open("custom.txt", "r") as f:
-    raw_text = f.read()
-
-# Prepare dataset
-dataset = CustomDataset(raw_text, tokenizer)
-dataloader = DataLoader(dataset, batch_size=2)
-
-# Train
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-train(model, dataloader, optimizer, epochs=10)
-
-# Save model
-torch.save(model.state_dict(), "gpt_custom.pt")
-
-
-########## CODE TO TEST GPT2 MODEL ##########
-def generate_text_simple(model, idx, max_new_tokens, context_size):
-    # idx is (B, T) array of indices in the current context
-    for _ in range(max_new_tokens):
-
-        # Crop current context if it exceeds the supported context size
-        # E.g., if LLM supports only 5 tokens, and the context size is 10
-        # then only the last 5 tokens are used as context
-        idx_cond = idx[:, -context_size:]
-
-        # Get the predictions
-        with torch.no_grad():
-            logits = model(idx_cond)
-
-        # Focus only on the last time step
-        # (batch, n_token, vocab_size) becomes (batch, vocab_size)
-        logits = logits[:, -1, :]
-
-        # Get the idx of the vocab entry with the highest logits value
-        idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch, 1)
-
-        # Append sampled index to the running sequence
-        idx = torch.cat((idx, idx_next), dim=1)  # (batch, n_tokens+1)
-
-    return idx
-
-model.load_state_dict(torch.load("gpt_custom.pt"))
-model.eval() 
-
-print(f"\n{50*'='}\n{22*' '}IN\n{50*'='}")
-print("\nInput text:", start_context)
-print("Encoded input text:", encoded)
-print("encoded_tensor.shape:", encoded_tensor.shape)
-
-out = generate_text_simple(
-        model=model,
-        idx=encoded_tensor,
-        max_new_tokens=10,
-        context_size=config.context_length
-    )
-decoded_text = tokenizer.decode(out.squeeze(0).tolist())
-
-print(f"\n\n{50*'='}\n{22*' '}OUT\n{50*'='}")
-print("\nOutput:", out)
-print("Output length:", len(out[0]))
-print("Output text:", decoded_text)
