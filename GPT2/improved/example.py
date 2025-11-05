@@ -37,12 +37,16 @@ def generate_text(model, idx, max_new_tokens, context_size, temperature, top_p):
         # Temperature and top-p
         logits = logits / temperature
 
+        if idx.shape[1] > 1:
+            for token_id in set(idx[0].tolist()):
+                logits[0, token_id] /= 1.2 
+
         if top_p < 1.0:
             sorted_logits, sorted_indicies = torch.sort(logits, descending=True)
             cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
             
             to_remove = cum_probs > top_p
-            to_remove[0, 1:] = to_remove[0, :-1].clone()
+            to_remove[0, 1:] = to_remove[:, :-1].clone()
             to_remove[0, 0] = 0
             to_remove = to_remove.scatter(1, sorted_indicies, to_remove)
 

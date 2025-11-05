@@ -11,9 +11,9 @@ from model import GPT2, Config
 
 
 SEED = 2025
-BATCH_SIZE = 2
-EPOCHS = 10
-PATIENCE = 5
+BATCH_SIZE = 8
+EPOCHS = 50
+PATIENCE = 7
 RATE = 1e-3
 SCHEDULE = 0.1
 CLIP = 1.0
@@ -38,7 +38,7 @@ if torch.cuda.is_available():
 
 
 class CustomDataset(Dataset):
-    def __init__(self, data, tokenizer, block_size=32):
+    def __init__(self, data, tokenizer, block_size=256):
         self.tokenizer = tokenizer
         self.data = tokenizer.encode(data)
         self.block_size = block_size
@@ -108,7 +108,7 @@ def train(model, train_loader, val_loader, optimizer, epochs, patience, clip_val
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], [warmup_steps])
 
-    scaler = GradScaler('cuda')
+    scaler = GradScaler('mps')
     
     model.train()
     for epoch in range(epochs):
