@@ -53,7 +53,7 @@ torch.manual_seed(123)
 
 config = Config()
 
-device = torch.device("cuda")
+device = torch.device("mps")
 start_context = "Every effort moves you"
 tokenizer = tiktoken.get_encoding("gpt2")
 
