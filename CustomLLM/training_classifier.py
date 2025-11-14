@@ -3,8 +3,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import tiktoken
 import pandas as pd
+import urllib.request
+import zipfile
+import os
+from pathlib import Path
 
 from classifier import GPTModel, Config
+from gpt_download import download_and_load_gpt2
 
 class SpamDataset(Dataset):
     def __init__(self, csv_file, tokenizer, max_length=None,
@@ -69,6 +74,25 @@ def create_data_loader_v1(csv, batch_size=4, max_length=256,
 
     return dataloader
 
+def download_and_unzip_spam_data(
+        url, zip_path, extracted_path, data_file_path):
+    if data_file_path.exists():
+        print(f"{data_file_path} already exists. Skipping download "
+              "and extraction."
+        )
+        return
+
+    with urllib.request.urlopen(url) as response:    #1
+        with open(zip_path, "wb") as out_file:
+            out_file.write(response.read())
+
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:    #2
+        zip_ref.extractall(extracted_path)
+
+    original_file_path = Path(extracted_path) / "SMSSpamCollection"
+    os.rename(original_file_path, data_file_path)               #3
+    print(f"File downloaded and saved as {data_file_path}")
+
 def random_split(df, train_frac, validation_frac):
 
     df = df.sample(
@@ -92,6 +116,91 @@ def create_balanced_dataset(df):
         ham_subset, df[df["Label"] == "spam"]
     ])                               
     return balanced_df
+
+def assign(left, right):
+    if left.shape != right.shape:
+        raise ValueError(f"Shape mismatch. Left: {left.shape}, "
+                          "Right: {right.shape}"
+        )
+    return torch.nn.Parameter(torch.tensor(right))
+
+def load_weights_into_gpt(gpt, params):           
+    gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params['wpe'])
+    gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params['wte'])
+
+    for b in range(len(params["blocks"])):     
+        q_w, k_w, v_w = np.split(                            
+            (params["blocks"][b]["attn"]["c_attn"])["w"], 3, axis=-1
+        )
+        gpt.trf_blocks[b].att.W_query.weight = assign(
+            gpt.trf_blocks[b].att.W_query.weight, q_w.T
+        )
+        gpt.trf_blocks[b].att.W_key.weight = assign(
+            gpt.trf_blocks[b].att.W_key.weight, k_w.T
+        )
+        gpt.trf_blocks[b].att.W_value.weight = assign(
+            gpt.trf_blocks[b].att.W_value.weight, v_w.T
+        )
+
+        q_b, k_b, v_b = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["b"], 3, axis=-1
+        )
+        gpt.trf_blocks[b].att.W_query.bias = assign(
+            gpt.trf_blocks[b].att.W_query.bias, q_b
+        )
+        gpt.trf_blocks[b].att.W_key.bias = assign(
+            gpt.trf_blocks[b].att.W_key.bias, k_b
+        )
+        gpt.trf_blocks[b].att.W_value.bias = assign(
+            gpt.trf_blocks[b].att.W_value.bias, v_b
+        )
+
+        gpt.trf_blocks[b].att.out_proj.weight = assign(
+            gpt.trf_blocks[b].att.out_proj.weight, 
+            params["blocks"][b]["attn"]["c_proj"]["w"].T
+        )
+        gpt.trf_blocks[b].att.out_proj.bias = assign(
+            gpt.trf_blocks[b].att.out_proj.bias, 
+            params["blocks"][b]["attn"]["c_proj"]["b"]
+        )
+
+        gpt.trf_blocks[b].ff.layers[0].weight = assign(
+            gpt.trf_blocks[b].ff.layers[0].weight, 
+            params["blocks"][b]["mlp"]["c_fc"]["w"].T
+        )
+        gpt.trf_blocks[b].ff.layers[0].bias = assign(
+            gpt.trf_blocks[b].ff.layers[0].bias, 
+            params["blocks"][b]["mlp"]["c_fc"]["b"]
+        )
+        gpt.trf_blocks[b].ff.layers[2].weight = assign(
+            gpt.trf_blocks[b].ff.layers[2].weight, 
+            params["blocks"][b]["mlp"]["c_proj"]["w"].T
+        )
+        gpt.trf_blocks[b].ff.layers[2].bias = assign(
+            gpt.trf_blocks[b].ff.layers[2].bias, 
+            params["blocks"][b]["mlp"]["c_proj"]["b"]
+        )
+
+        gpt.trf_blocks[b].norm1.scale = assign(
+            gpt.trf_blocks[b].norm1.scale, 
+            params["blocks"][b]["ln_1"]["g"]
+        )
+        gpt.trf_blocks[b].norm1.shift = assign(
+            gpt.trf_blocks[b].norm1.shift, 
+            params["blocks"][b]["ln_1"]["b"]
+        )
+        gpt.trf_blocks[b].norm2.scale = assign(
+            gpt.trf_blocks[b].norm2.scale, 
+            params["blocks"][b]["ln_2"]["g"]
+        )
+        gpt.trf_blocks[b].norm2.shift = assign(
+            gpt.trf_blocks[b].norm2.shift, 
+            params["blocks"][b]["ln_2"]["b"]
+        )
+
+    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
+    gpt.final_norm.shift = assign(gpt.final_norm.shift, params["b"])
+    gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"]) 
 
 def calc_accuracy_loader(data_loader, model, device, num_batches=None):
     model.eval()
@@ -204,7 +313,7 @@ def classify_review(text, model, tokenizer, device, max_length=None, pad_token_i
 
 torch.manual_seed(123)
 
-device = torch.device("mps")
+device = torch.device("cuda")
 start_context = "Every effort moves you"
 tokenizer = tiktoken.get_encoding("gpt2")
 
@@ -213,42 +322,75 @@ batch_size = 8
 
 config = Config()
 
-data_file_path = "train.tsv"
+url = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
+zip_path = "sms_spam_collection.zip"
+extracted_path = "sms_spam_collection"
+data_file_path = Path(extracted_path) / "SMSSpamCollection.tsv"
+
+download_and_unzip_spam_data(url, zip_path, extracted_path, data_file_path)
 
 df = pd.read_csv(
     data_file_path, sep="\t", header=None, names=["Label", "Text"]
 )
 balanced_df = create_balanced_dataset(df)
-train_df, validation_df = random_split(balanced_df, 0.8, 0.2)
+train_df, validation_df, test_df = random_split(balanced_df, 0.8, 0.2)
 train_df.to_csv("train.csv", index=None)
 validation_df.to_csv("validation.csv", index=None)
+test_df.to_csv("test.csv", index=None)
 
-train_data = SpamDataset(
+train_dataset = SpamDataset(
     csv_file="train.csv",
     max_length=None,
     tokenizer=tokenizer
 )
-val_data = SpamDataset(
+val_dataset = SpamDataset(
     csv_file="validation.csv",
-    max_length=None,
+    max_length=train_dataset.max_length,
+    tokenizer=tokenizer
+)
+test_dataset = SpamDataset(
+    csv_file="test.csv",
+    max_length=train_dataset.max_length,
     tokenizer=tokenizer
 )
 
 train_loader = DataLoader(
-    dataset=train_data,
+    dataset=train_dataset,
     batch_size=batch_size,
     shuffle=True,
     num_workers=num_workers,
     drop_last=True,
 )
 val_loader = DataLoader(
-    dataset=val_data,
+    dataset=val_dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    drop_last=False,
+)
+test_loader = DataLoader(
+    dataset=test_dataset,
     batch_size=batch_size,
     num_workers=num_workers,
     drop_last=False,
 )
 
-model = GPTModel(config)
+settings, params = download_and_load_gpt2(
+    model_size="124M", models_dir="gpt2"
+)
+
+model_configs = {
+    "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},
+    "gpt2-medium (355M)": {"emb_dim": 1024, "n_layers": 24, "n_heads": 16},
+    "gpt2-large (774M)": {"emb_dim": 1280, "n_layers": 36, "n_heads": 20},
+    "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
+}
+
+model_name = "gpt2-small (124M)"
+NEW_CONFIG = config.copy()
+NEW_CONFIG.update(model_configs[model_name])
+NEW_CONFIG.update({"context_length": 1024})
+NEW_CONFIG.update({"qkv_bias": True})
+model = GPTModel(NEW_CONFIG)
 for param in model.parameters():
     param.requires_grad = False
 for param in model.trf_blocks[-1].parameters():
@@ -271,11 +413,14 @@ with torch.no_grad():
     train_loss = calc_loss_loader(data_loader=train_loader, model=model, device=device)
     val_loss = calc_loss_loader(data_loader=val_loader, model=model, device=device)
 
-train_accuracy = calc_accuracy_loader(train_loader, model, device)
-val_accuracy = calc_accuracy_loader(val_loader, model, device)
+train_accuracy = calc_accuracy_loader(train_loader, model, device, num_batches=10)
+val_accuracy = calc_accuracy_loader(val_loader, model, device, num_batches=10)
+test_accuracy = calc_accuracy_loader(test_loader, model, device, num_batches=10)
+
 torch.save(model.state_dict(), "review_classifier.pth")
 print(train_loss)
 print(val_loss)
 print("=============================")
 print(f"{train_accuracy}%")
 print(f"{val_accuracy}%")
+print(f"{test_accuracy}%")

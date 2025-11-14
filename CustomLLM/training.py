@@ -137,7 +137,7 @@ val_loader = create_data_loader_v1(
     num_workers=0
 )
 
-device = torch.device("mps")
+device = torch.device("cuda")
 start_context = "Every effort moves you"
 tokenizer = tiktoken.get_encoding("gpt2")
 
