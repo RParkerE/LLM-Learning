@@ -69,7 +69,7 @@ def calc_loss_loader(data_loader, model, device, num_batches=None):
     
     return total_loss / num_batches
 
-def train_model_simple(model, train_loder, val_loader, optimizer, device, 
+def train_model_simple(model, train_loader, val_loader, optimizer, device, 
                         num_epochs, eval_freq, eval_iter, start_context, tokenizer):
     train_losses, val_losses, track_tokens_seen = [], [], []
     tokens_seen, global_step = 0, -1
